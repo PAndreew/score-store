@@ -3,7 +3,7 @@ import type { Sqlite3Static } from '@sqlite.org/sqlite-wasm';
 import type { GameSession, GameTemplate, SessionPlayer, ScoreEntry } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
-const DB_NAME = 'score_ledger_v2.sqlite3';
+const DB_NAME = 'score_store.sqlite3';
 
 class LedgerDatabase {
   private db: Database | null = null;
