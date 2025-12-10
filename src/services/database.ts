@@ -1,194 +1,237 @@
-import sqlite3InitModule, { type Database, type Sqlite3Static } from '@sqlite.org/sqlite-wasm';
-import type { Game, Player, Round, GridRow } from '../types';
-import { v4 as uuidv4 } from 'uuid'; // You'll need: npm i uuid @types/uuid
+import sqlite3InitModule, { Database } from '@sqlite.org/sqlite-wasm';
+import type { Sqlite3Static } from '@sqlite.org/sqlite-wasm';
+import type { GameSession, GameTemplate, SessionPlayer, ScoreEntry } from '../types';
+import { v4 as uuidv4 } from 'uuid';
 
-const DB_NAME = 'score_store.sqlite3';
+const DB_NAME = 'score_ledger_v2.sqlite3';
 
-// Helper type for SQLite rows when using rowMode: 'object'
-// The library types can be tricky, so we use 'any' for the raw row 
-// to avoid "SqlValue is not assignable to..." errors, then cast manually.
-type SqlRow = any; 
-
-class GameDatabase {
+class LedgerDatabase {
   private db: Database | null = null;
   private sqlite3: Sqlite3Static | null = null;
 
   async init() {
     if (this.db) return;
 
-    this.sqlite3 = await sqlite3InitModule({
-      print: console.log,
-      printErr: console.error,
-    });
+    try {
+        this.sqlite3 = await sqlite3InitModule({
+            print: console.log,
+            printErr: console.error,
+            locateFile: (file) => `/${file}`,
+        });
+    } catch (e) {
+        console.error("Failed to load SQLite WASM:", e);
+        return;
+    }
 
-    if (!this.sqlite3) throw new Error('Failed to load SQLite WASM');
+    if (!this.sqlite3) return;
 
     try {
-      if ('opfs' in this.sqlite3) {
-        this.db = new this.sqlite3.oo1.OpfsDb(DB_NAME);
-      } else {
-        console.warn('OPFS not supported, using in-memory DB.');
-        this.db = new this.sqlite3.oo1.DB(DB_NAME, 'ct');
-      }
+        if ('opfs' in this.sqlite3) {
+            this.db = new this.sqlite3.oo1.OpfsDb(DB_NAME);
+            console.log('Using Persistent OPFS Storage');
+        } else {
+            this.db = new this.sqlite3.oo1.DB(DB_NAME, 'ct');
+            console.warn('Using In-Memory Storage (Data will be lost on refresh)');
+        }
     } catch (e) {
-      console.error("Database init error:", e);
-      // Fallback if OPFS fails
-      this.db = new this.sqlite3.oo1.DB(DB_NAME, 'ct');
+        console.error("Storage init failed:", e);
+        // Fallback
+        this.db = new this.sqlite3.oo1.DB(DB_NAME, 'ct');
     }
 
     this.runMigrations();
+    this.seedTemplates();
   }
 
   private runMigrations() {
     if (!this.db) return;
-
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS games (
+      CREATE TABLE IF NOT EXISTS templates (
         id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        created_at INTEGER,
-        rule_type TEXT DEFAULT 'SUM'
-      );
-      CREATE TABLE IF NOT EXISTS players (
-        id TEXT PRIMARY KEY,
-        game_id TEXT,
         name TEXT,
-        order_index INTEGER,
-        FOREIGN KEY(game_id) REFERENCES games(id)
+        min_players INTEGER,
+        max_players INTEGER,
+        win_condition TEXT,
+        round_structure TEXT,
+        default_round_names JSON
       );
-      CREATE TABLE IF NOT EXISTS rounds (
+      CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
-        game_id TEXT,
-        round_number INTEGER,
-        FOREIGN KEY(game_id) REFERENCES games(id)
+        template_id TEXT,
+        played_at TEXT,
+        is_finished BOOLEAN DEFAULT 0,
+        FOREIGN KEY(template_id) REFERENCES templates(id)
+      );
+      CREATE TABLE IF NOT EXISTS session_players (
+        id TEXT PRIMARY KEY,
+        session_id TEXT,
+        name TEXT,
+        seat_index INTEGER,
+        FOREIGN KEY(session_id) REFERENCES sessions(id)
       );
       CREATE TABLE IF NOT EXISTS scores (
-        round_id TEXT,
+        session_id TEXT,
+        round_index INTEGER,
         player_id TEXT,
         value INTEGER,
-        PRIMARY KEY (round_id, player_id)
+        PRIMARY KEY (session_id, round_index, player_id)
       );
     `);
   }
 
-  exportDatabase(): Blob | null {
-    if (!this.sqlite3 || !this.db) return null;
-    
-    // Fix: Pass the db instance directly, not .pointer
-    // The type definition expects "number | Database"
-    try {
-      const byteArray = this.sqlite3.capi.sqlite3_js_db_export(this.db);
-      return new Blob([byteArray], { type: 'application/x-sqlite3' });
-    } catch (e) {
-      console.error("Export failed:", e);
-      return null;
-    }
-  }
-
-  // --- CRUD Operations ---
-
-  createGame(name: string): Game {
-    const game: Game = {
-      id: uuidv4(),
-      name,
-      created_at: Date.now(),
-      rule_type: 'SUM'
-    };
-    this.db?.exec({
-      sql: 'INSERT INTO games VALUES (?, ?, ?, ?)',
-      bind: [game.id, game.name, game.created_at, game.rule_type]
-    });
-    return game;
-  }
-
-  getPlayers(gameId: string): Player[] {
-    const result: Player[] = [];
-    this.db?.exec({
-      sql: 'SELECT * FROM players WHERE game_id = ? ORDER BY order_index ASC',
-      bind: [gameId],
-      rowMode: 'object',
-      // Fix: Wrap push in braces to return void, avoiding the type error
-      callback: (row: SqlRow) => {
-        result.push(row as Player);
-      }
-    });
-    return result;
-  }
-
-  addPlayer(gameId: string, name: string): Player {
-    const player: Player = {
-        id: uuidv4(),
-        game_id: gameId,
-        name,
-        order_index: Date.now()
-    };
-    this.db?.exec({
-        sql: 'INSERT INTO players VALUES (?, ?, ?, ?)',
-        bind: [player.id, player.game_id, player.name, player.order_index]
-    });
-    return player;
-  }
-
-  addRound(gameId: string): Round {
-    let maxRound = 0;
-    this.db?.exec({
-        sql: 'SELECT MAX(round_number) as m FROM rounds WHERE game_id = ?',
-        bind: [gameId],
-        // Fix: Explicitly type vals as any[] to handle the result safely
-        callback: (vals: any[]) => { 
-          maxRound = Number(vals[0]) || 0; 
-        }
-    });
-
-    const round: Round = {
-        id: uuidv4(),
-        game_id: gameId,
-        round_number: maxRound + 1
-    };
-
-    this.db?.exec({
-        sql: 'INSERT INTO rounds VALUES (?, ?, ?)',
-        bind: [round.id, round.game_id, round.round_number]
-    });
-    return round;
-  }
-
-  getRoundsWithScores(gameId: string): GridRow[] {
-    if (!this.db) return [];
-    
-    const rounds: Round[] = [];
+  private seedTemplates() {
+    if (!this.db) return;
+    // Check if templates exist using a safe query
+    let count = 0;
     this.db.exec({
-        sql: 'SELECT * FROM rounds WHERE game_id = ? ORDER BY round_number ASC',
-        bind: [gameId],
-        rowMode: 'object',
-        callback: (row: SqlRow) => {
-          rounds.push(row as Round);
-        }
+        sql: 'SELECT count(*) as c FROM templates',
+        callback: (vals: any[]) => { count = Number(vals[0]); }
+    });
+    
+    if (count > 0) return;
+
+    // 1. Scrabble (Generic)
+    this.createTemplate({
+        id: uuidv4(),
+        name: "Scrabble / Generic",
+        min_players: 2,
+        max_players: 8,
+        win_condition: 'HIGHEST_SCORE',
+        round_structure: 'DYNAMIC',
+        default_round_names: []
     });
 
-    return rounds.map(r => {
-        const scores: Record<string, number> = {};
-        this.db!.exec({
-            sql: 'SELECT player_id, value FROM scores WHERE round_id = ?',
-            bind: [r.id],
-            rowMode: 'object',
-            callback: (row: SqlRow) => {
-                // Ensure we cast appropriately
-                const s = row as { player_id: string; value: number };
-                scores[s.player_id] = s.value;
-            }
-        });
-        return { round: r, scores };
+    // 2. Lórum (Specific Hungarian Card Game)
+    this.createTemplate({
+        id: uuidv4(),
+        name: "Lórum",
+        min_players: 4,
+        max_players: 4,
+        win_condition: 'LOWEST_SCORE',
+        round_structure: 'FIXED',
+        // Standard Lórum rounds
+        default_round_names: ["Piros", "Felső", "Alsó", "Hátul", "Mente", "Lórum", "Piros", "Felső", "Alsó", "Hátul", "Mente", "Lórum"] 
     });
   }
 
-  updateScore(roundId: string, playerId: string, value: number) {
+  private createTemplate(t: any) {
     this.db?.exec({
-        sql: `INSERT INTO scores (round_id, player_id, value) VALUES (?, ?, ?)
-              ON CONFLICT(round_id, player_id) DO UPDATE SET value=excluded.value`,
-        bind: [roundId, playerId, value]
+        sql: 'INSERT INTO templates VALUES (?, ?, ?, ?, ?, ?, ?)',
+        bind: [t.id, t.name, t.min_players, t.max_players, t.win_condition, t.round_structure, JSON.stringify(t.default_round_names)]
+    });
+  }
+
+  // --- API ---
+
+  getTemplates(): GameTemplate[] {
+    const res: GameTemplate[] = [];
+    this.db?.exec({
+        sql: 'SELECT * FROM templates',
+        rowMode: 'object',
+        // Fix: Explicit 'any' type and block { } to return void
+        callback: (row: any) => {
+            res.push({
+                ...row,
+                default_round_names: JSON.parse(row.default_round_names || '[]')
+            });
+        }
+    });
+    return res;
+  }
+
+  getSessionsByDate(dateStr: string): GameSession[] {
+    const res: GameSession[] = [];
+    this.db?.exec({
+        sql: `SELECT s.*, t.name as template_name 
+              FROM sessions s 
+              JOIN templates t ON s.template_id = t.id 
+              WHERE s.played_at = ?`,
+        bind: [dateStr],
+        rowMode: 'object',
+        // Fix: Explicit 'any' type and block { }
+        callback: (row: any) => {
+            res.push(row);
+        }
+    });
+    return res;
+  }
+
+  createSession(templateId: string, playerNames: string[]): string {
+    const sessionId = uuidv4();
+    const dateStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+
+    this.db?.transaction(() => {
+        this.db?.exec({
+            sql: 'INSERT INTO sessions (id, template_id, played_at) VALUES (?, ?, ?)',
+            bind: [sessionId, templateId, dateStr]
+        });
+
+        playerNames.forEach((name, index) => {
+            this.db?.exec({
+                sql: 'INSERT INTO session_players VALUES (?, ?, ?, ?)',
+                bind: [uuidv4(), sessionId, name, index]
+            });
+        });
+    });
+    return sessionId;
+  }
+
+  getSessionDetails(sessionId: string) {
+    if (!this.db) return null;
+    
+    let session: any = null;
+    let template: any = null;
+    const players: SessionPlayer[] = [];
+    const scores: ScoreEntry[] = [];
+
+    // Get Session
+    this.db.exec({
+        sql: 'SELECT * FROM sessions WHERE id = ?',
+        bind: [sessionId],
+        rowMode: 'object',
+        callback: (r: any) => { session = r; }
+    });
+
+    if(!session) return null;
+
+    // Get Template
+    this.db.exec({
+        sql: 'SELECT * FROM templates WHERE id = ?',
+        bind: [session.template_id],
+        rowMode: 'object',
+        callback: (r: any) => {
+             template = {...r, default_round_names: JSON.parse(r.default_round_names)};
+        }
+    });
+
+    // Get Players
+    this.db.exec({
+        sql: 'SELECT * FROM session_players WHERE session_id = ? ORDER BY seat_index',
+        bind: [sessionId],
+        rowMode: 'object',
+        callback: (r: any) => { players.push(r); }
+    });
+
+    // Get Scores
+    this.db.exec({
+        sql: 'SELECT * FROM scores WHERE session_id = ?',
+        bind: [sessionId],
+        rowMode: 'object',
+        callback: (r: any) => { scores.push(r); }
+    });
+
+    return { session, template, players, scores };
+  }
+
+  saveScore(sessionId: string, roundIdx: number, playerId: string, value: number) {
+    this.db?.exec({
+        sql: `INSERT INTO scores (session_id, round_index, player_id, value) 
+              VALUES (?, ?, ?, ?)
+              ON CONFLICT(session_id, round_index, player_id) 
+              DO UPDATE SET value=excluded.value`,
+        bind: [sessionId, roundIdx, playerId, value]
     });
   }
 }
 
-export const dbService = new GameDatabase();
+export const db = new LedgerDatabase();

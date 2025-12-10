@@ -1,109 +1,77 @@
-import { useState } from 'react';
-import { useGameEngine } from './hooks/useGameEngine';
-import './theme.css'; // Import the CSS variables
+import React, { useState } from 'react';
+import { useLedger } from './hooks/useLedger';
+import { NewGameModal } from './components/NewGameModal';
+import { ActiveSession } from './ActiveSession';
+import { db } from './services/database';
 
 function App() {
-  const { isReady, activeGame, players, gridData, actions } = useGameEngine();
-  const [theme, setTheme] = useState<'default' | 'retro'>('default');
+  const { isReady, todaySessions, templates, refresh } = useLedger();
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
-  // Theme Toggler
-  const toggleTheme = () => {
-    const newTheme = theme === 'default' ? 'retro' : 'default';
-    setTheme(newTheme);
-    document.documentElement.setAttribute('data-theme', newTheme);
-  };
+  if (!isReady) return <div className="flex h-screen items-center justify-center">Loading Ledger...</div>;
 
-  // Helper: Calculate Totals
-  const calculateTotal = (playerId: string) => {
-    return gridData.reduce((sum, row) => {
-      return sum + (row.scores[playerId] || 0);
-    }, 0);
-  };
+  // View: Active Game
+  if (activeSessionId) {
+    return <ActiveSession sessionId={activeSessionId} onBack={() => { setActiveSessionId(null); refresh(); }} />;
+  }
 
-  if (!isReady) return <div className="p-10">Loading Database...</div>;
-
+  // View: Dashboard
   return (
-    <div className="min-h-screen theme-bg-app theme-text p-8 font-[family-name:var(--font-family)]">
-      <div className="max-w-4xl mx-auto space-y-6">
+    <div className="min-h-screen bg-slate-100 p-8 font-sans">
+      <div className="max-w-2xl mx-auto space-y-8">
         
-        {/* Header / Controls */}
-        <div className="flex justify-between items-center theme-bg-panel p-6 rounded-xl shadow-lg">
-          <h1 className="text-2xl font-bold">
-            {activeGame ? activeGame.name : "Family Score Ledger"}
-          </h1>
-          
-          <div className="flex gap-2">
-            <button onClick={toggleTheme} className="theme-btn opacity-80">
-              Toggle Theme
+        {/* Header */}
+        <div className="flex justify-between items-end">
+            <div>
+                <h1 className="text-3xl font-bold text-slate-800">George's Ledger</h1>
+                <p className="text-slate-500">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+            </div>
+            <button 
+                onClick={() => setIsModalOpen(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg shadow-lg font-bold transition flex items-center gap-2"
+            >
+                <span>+</span> New Game
             </button>
-            {activeGame && (
-              <button onClick={actions.exportSaveFile} className="theme-btn bg-green-600">
-                Backup to File
-              </button>
-            )}
-          </div>
         </div>
 
-        {/* Game Setup or Grid */}
-        {!activeGame ? (
-          <div className="theme-bg-panel p-10 rounded-xl shadow-lg text-center">
-            <button 
-              onClick={() => actions.createNewGame("New Family Night")}
-              className="theme-btn text-lg"
-            >
-              Start New Game
-            </button>
-          </div>
-        ) : (
-          <div className="theme-bg-panel p-6 rounded-xl shadow-lg overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr>
-                  <th className="p-3 border-b-2 border-gray-200">Round</th>
-                  {players.map(player => (
-                    <th key={player.id} className="p-3 border-b-2 border-gray-200">
-                      {player.name}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {gridData.map((row) => (
-                  <tr key={row.round.id} className="hover:bg-black/5">
-                    <td className="p-3 font-mono opacity-50">#{row.round.round_number}</td>
-                    {players.map(player => (
-                      <td key={player.id} className="p-1">
-                        <input
-                          type="number"
-                          className="w-full theme-input p-2"
-                          value={row.scores[player.id] ?? ''}
-                          onChange={(e) => actions.setScore(row.round.id, player.id, e.target.value)}
-                        />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-                
-                {/* Footer / Results */}
-                <tr className="font-bold bg-black/5 border-t-2 border-black">
-                  <td className="p-3">TOTAL</td>
-                  {players.map(player => (
-                    <td key={player.id} className="p-3 text-lg text-[var(--color-accent)]">
-                      {calculateTotal(player.id)}
-                    </td>
-                  ))}
-                </tr>
-              </tbody>
-            </table>
-
-            <div className="mt-6 flex justify-center">
-              <button onClick={actions.addRound} className="theme-btn">
-                + Add Round
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Today's List */}
+        <div className="space-y-4">
+            <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Today's Games</h2>
+            
+            {todaySessions.length === 0 ? (
+                <div className="text-center py-12 bg-white rounded-xl border-2 border-dashed border-slate-200">
+                    <p className="text-slate-400">No games played today yet.</p>
+                </div>
+            ) : (
+                todaySessions.map(session => (
+                    <div 
+                        key={session.id} 
+                        onClick={() => setActiveSessionId(session.id)}
+                        className="bg-white p-5 rounded-xl shadow-sm hover:shadow-md transition cursor-pointer border border-slate-100 flex justify-between items-center"
+                    >
+                        <div>
+                            <h3 className="font-bold text-lg text-slate-800">{session.template_name}</h3>
+                            <p className="text-xs text-slate-500">ID: {session.id.slice(0, 8)}...</p>
+                        </div>
+                        <div className="text-blue-600 font-medium">Continue →</div>
+                    </div>
+                ))
+            )}
+        </div>
       </div>
+
+      {isModalOpen && (
+        <NewGameModal 
+            templates={templates} 
+            onClose={() => setIsModalOpen(false)}
+            onStart={(templateId: string, players: string[]) => {
+                const id = db.createSession(templateId, players);
+                setIsModalOpen(false);
+                setActiveSessionId(id);
+            }}
+        />
+      )}
     </div>
   );
 }
