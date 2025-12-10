@@ -1,5 +1,5 @@
-import sqlite3InitModule, { Database } from '@sqlite.org/sqlite-wasm';
-import type { Sqlite3Static } from '@sqlite.org/sqlite-wasm';
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+import type {Database, Sqlite3Static } from '@sqlite.org/sqlite-wasm';
 import type { GameSession, GameTemplate, SessionPlayer, ScoreEntry } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
