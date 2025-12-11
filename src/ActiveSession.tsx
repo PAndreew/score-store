@@ -1,34 +1,61 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useMemo } from 'react';
+import { 
+    useReactTable, 
+    getCoreRowModel, 
+    flexRender,
+} from '@tanstack/react-table';
+import type { ColumnDef } from '@tanstack/react-table';
 import { db } from './services/database';
-import type { SessionPlayer, ScoreEntry, GameSession } from './types';
-import { Calendar, Plus, ChevronLeft, UserPlus, Trophy, Clock } from 'lucide-react';
+import type { SessionDetails } from './types';
+import { ArrowLeft, UserPlus, Trophy, Save, CalendarIcon, MoreHorizontal } from 'lucide-react';
+import { Button } from './components/ui/button';
+import { Input } from './components/ui/input';
+import { Calendar } from './components/ui/calendar';
+import { Popover, PopoverContent, PopoverTrigger } from './components/ui/popover';
+import { 
+    Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableFooter 
+} from './components/ui/table';
+import { cn } from './lib/utils';
+import { format } from "date-fns";
 import { v4 as uuidv4 } from 'uuid';
 
-const getScore = (scores: ScoreEntry[], roundIdx: number, playerId: string) => 
-    scores.find(s => s.round_index === roundIdx && s.player_id === playerId)?.value ?? '';
+// --- Types for the Table Row ---
+// We pivot the data: One row = One Round, with dynamic properties for each player
+type RoundRow = {
+    roundIndex: number;
+    roundName: string;
+    [playerId: string]: number | string; // Dynamic scores
+};
+
+// Visual Helpers
+const getInitials = (name: string) => name.substring(0,2).toUpperCase();
+const avatarColors = [
+    'bg-pink-100 text-pink-700', 'bg-purple-100 text-purple-700', 
+    'bg-blue-100 text-blue-700', 'bg-emerald-100 text-emerald-700'
+];
 
 export const ActiveSession = ({ 
     sessionId, 
-    onBack, 
-    onNewGame,
-    history 
+    onBack 
 }: { 
     sessionId: string, 
-    onBack: () => void,
-    onNewGame: () => void,
-    history: GameSession[]
+    onBack: () => void 
 }) => {
-  const [data, setData] = useState<any>(null);
+  const [sessionData, setSessionData] = useState<SessionDetails | null>(null);
   const [dynamicRounds, setDynamicRounds] = useState<number[]>([]);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [date, setDate] = useState<Date | undefined>(new Date());
 
+  // 1. Load Data
   const loadData = () => {
     const res = db.getSessionDetails(sessionId);
     if (res) {
-        setData(res);
+        // @ts-ignore 
+        setSessionData(res);
+        setDate(new Date(res.session.played_at));
+        
+        // Handle dynamic round structure
         const maxRound = res.scores.reduce((max, s) => Math.max(max, s.round_index), -1);
         if (res.template.round_structure === 'DYNAMIC') {
-            // Ensure we have at least one empty row beyond the last filled one
             const count = Math.max(maxRound + 2, 5); 
             setDynamicRounds(Array.from({length: count}, (_, i) => i));
         }
@@ -37,197 +64,224 @@ export const ActiveSession = ({
 
   useEffect(loadData, [sessionId]);
 
-  // Handle adding a new player mid-game
-  const handleAddPlayer = () => {
-    const name = prompt("Enter new player name:");
-    if (!name || !data) return;
-    
-    // We access the DB directly here to inject a player
-    // Ideally this moves to database.ts as a method
-    // @ts-ignore - quick access for refactor
-    db.db?.exec({
-        sql: 'INSERT INTO session_players VALUES (?, ?, ?, ?)',
-        bind: [uuidv4(), sessionId, name, data.players.length]
-    });
-    loadData();
-  };
-
-  if (!data) return <div className="p-10 text-center font-bold text-slate-400">Loading Board...</div>;
-
-  const { template, players, scores, session } = data;
-  const isFixed = template.round_structure === 'FIXED';
-  const rows = isFixed ? template.default_round_names : dynamicRounds;
-
   const handleScoreChange = (roundIdx: number, playerId: string, val: string) => {
     const num = val === '' ? 0 : parseInt(val);
     if (isNaN(num)) return;
     
     db.saveScore(sessionId, roundIdx, playerId, num);
     
-    // If dynamic and we typed in the last row, add more rows
-    if (!isFixed && roundIdx === dynamicRounds.length - 1) {
-        setDynamicRounds([...dynamicRounds, dynamicRounds.length]);
+    // Auto-add row if dynamic
+    if (sessionData?.template.round_structure === 'DYNAMIC' && roundIdx === dynamicRounds.length - 1) {
+        setDynamicRounds(prev => [...prev, prev.length]);
     }
     loadData();
   };
 
-  // Calculate Totals & Ranking
-  const totals = players.map((p: SessionPlayer) => {
-    const total = scores
-      .filter((s: ScoreEntry) => s.player_id === p.id)
-      .reduce((sum: number, s: ScoreEntry) => sum + s.value, 0);
-    return { ...p, total };
+  // 2. Prepare Data for TanStack Table (Pivot Logic)
+  const tableData = useMemo(() => {
+    if (!sessionData) return [];
+    
+    const rows: number[] | string[] = sessionData.template.round_structure === 'FIXED' 
+        ? sessionData.template.default_round_names 
+        : dynamicRounds;
+
+    return rows.map((rName, rIdx) => {
+        const row: RoundRow = {
+            roundIndex: rIdx,
+            roundName: typeof rName === 'string' ? rName : `Round ${rIdx + 1}`,
+        };
+        // Fill player scores
+        sessionData.players.forEach(p => {
+            const score = sessionData.scores.find(s => s.round_index === rIdx && s.player_id === p.id);
+            row[p.id] = score ? score.value : '';
+        });
+        return row;
+    });
+  }, [sessionData, dynamicRounds]);
+
+
+  // 3. Define Columns & Formulas
+  const columns = useMemo<ColumnDef<RoundRow>[]>(() => {
+    if (!sessionData) return [];
+
+    // Helper to calculate best score for highlighting
+    const playerTotals = sessionData.players.map(p => ({
+        id: p.id,
+        total: sessionData.scores.filter(s => s.player_id === p.id).reduce((sum, s) => sum + s.value, 0)
+    }));
+    const bestTotal = sessionData.template.win_condition === 'HIGHEST_SCORE' 
+        ? Math.max(...playerTotals.map(p => p.total))
+        : Math.min(...playerTotals.map(p => p.total));
+
+    return [
+        // Column 1: Round Name
+        {
+            accessorKey: 'roundName',
+            header: () => <span className="pl-4">ROUND NAME</span>,
+            cell: (info) => <span className="pl-4 font-medium text-slate-600">{info.getValue() as string}</span>,
+            footer: () => <span className="pl-4 font-bold text-slate-400">TOTALS</span>
+        },
+        // Dynamic Columns: Players
+        ...sessionData.players.map((player, idx) => ({
+            accessorKey: player.id,
+            header: () => {
+                const isWinning = playerTotals.find(pt => pt.id === player.id)?.total === bestTotal;
+                return (
+                    <div className="flex items-center gap-3">
+                         <div className={cn(
+                            "h-9 w-9 rounded-full flex items-center justify-center text-[11px] font-bold shadow-sm ring-2 ring-white",
+                            avatarColors[idx % avatarColors.length]
+                        )}>
+                            {getInitials(player.name)}
+                        </div>
+                        <div className="flex flex-col leading-tight">
+                            <span className="text-sm font-bold text-slate-800">{player.name}</span>
+                            <span className="text-[10px] font-medium text-slate-400">Player {idx + 1}</span>
+                        </div>
+                        {isWinning && <Trophy size={14} className="ml-auto text-amber-400" fill="currentColor" />}
+                    </div>
+                );
+            },
+            cell: ({ row, getValue }) => (
+                <Input 
+                    type="number"
+                    className="h-10 w-full bg-transparent border-transparent text-center font-semibold text-slate-700 placeholder:text-slate-200 focus:bg-white focus:border-purple-200 focus:ring-2 focus:ring-purple-100 transition-all rounded-lg"
+                    placeholder="-"
+                    value={getValue() as string}
+                    onChange={(e) => handleScoreChange(row.original.roundIndex, player.id, e.target.value)}
+                />
+            ),
+            // THE FORMULA: Calculate Sum in Footer
+            footer: () => {
+                const total = playerTotals.find(pt => pt.id === player.id)?.total || 0;
+                const isBest = total === bestTotal;
+                return (
+                    <div className={cn(
+                        "flex flex-col items-center px-2 py-1 rounded-lg border min-w-[60px]",
+                        isBest ? 'border-purple-200 bg-purple-50/50 text-purple-700' : 'border-slate-100 bg-white text-slate-600'
+                    )}>
+                        <span className="text-lg font-bold leading-none">{total}</span>
+                    </div>
+                );
+            }
+        })),
+        // Column Last: Actions
+        {
+            id: 'actions',
+            header: () => <div className="text-right pr-4">ACTION</div>,
+            cell: () => (
+                <div className="flex justify-end gap-3 text-slate-300 pr-4">
+                    <button className="hover:text-purple-600 transition-colors"><Save size={16}/></button>
+                    <button className="hover:text-red-400 transition-colors"><MoreHorizontal size={16}/></button>
+                </div>
+            ),
+        }
+    ];
+  }, [sessionData, tableData]); // Re-calc columns when data changes to update footers
+
+  // 4. Initialize Table
+  const table = useReactTable({
+    data: tableData,
+    columns,
+    getCoreRowModel: getCoreRowModel(),
   });
 
-  const getRankStyle = (score: number) => {
-    const allScores = totals.map((t: any) => t.total);
-    const best = template.win_condition === 'HIGHEST_SCORE' ? Math.max(...allScores) : Math.min(...allScores);
-    return score === best ? 'text-yellow-600 bg-yellow-50 border-yellow-200' : 'text-slate-600';
+  const handleAddPlayer = () => {
+    const name = prompt("Enter new player name:");
+    if (!name || !sessionData) return;
+    // @ts-ignore
+    db.db?.exec({
+        sql: 'INSERT INTO session_players VALUES (?, ?, ?, ?)',
+        bind: [uuidv4(), sessionId, name, sessionData.players.length]
+    });
+    loadData();
   };
 
+  if (!sessionData) return <div className="p-10 text-purple-600">Loading...</div>;
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-800">
+    <div className="min-h-screen bg-slate-50 p-8 font-sans">
       
-      {/* --- HEADER --- */}
-      <header className="px-8 py-6 flex items-center justify-between">
-        
-        {/* Date Picker / Back Area */}
-        <div className="flex items-center gap-4 bg-white p-2 pr-6 rounded-full shadow-sm border border-slate-200">
-            <button onClick={onBack} className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center hover:bg-slate-200 transition">
-                <ChevronLeft size={20} />
-            </button>
-            <div className="flex items-center gap-3 border-l pl-4 border-slate-200">
-                <Calendar className="text-slate-400" size={18} />
-                <span className="font-bold text-slate-700">
-                    {new Date(session.played_at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric'})}
-                </span>
-            </div>
+      {/* --- HEADER (Same as before) --- */}
+      <div className="mx-auto max-w-[1400px] mb-8 space-y-6">
+        <div className="flex items-center gap-6 text-sm font-medium text-slate-500">
+            <button className="text-purple-700 border-b-2 border-purple-700 pb-1 px-1">Requested</button>
+            <button className="hover:text-slate-800 pb-1 px-1">Approved</button>
         </div>
 
-        <h1 className="text-xl font-black tracking-tight text-slate-300 uppercase">{template.name}</h1>
-
-        {/* Start New Game Button */}
-        <button 
-            onClick={onNewGame}
-            className="group flex items-center gap-3 bg-white pl-4 pr-2 py-2 rounded-full shadow-sm border border-slate-200 hover:border-blue-300 hover:shadow-md transition-all"
-        >
-            <span className="font-bold text-sm text-slate-600 group-hover:text-blue-600">START NEW GAME</span>
-            <div className="w-8 h-8 bg-slate-900 rounded-full text-white flex items-center justify-center group-hover:bg-blue-600 transition-colors">
-                <Plus size={18} strokeWidth={3} />
+        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+            <div>
+                <h1 className="text-3xl font-bold text-slate-900">{sessionData.template.name}</h1>
+                <p className="text-slate-500 mt-1">TanStack Table Edition</p>
             </div>
-        </button>
-      </header>
-
-
-      {/* --- MAIN GRID AREA --- */}
-      <main className="flex-1 px-8 pb-4 flex gap-6 overflow-hidden">
-        
-        {/* SCORE BOARD CARD */}
-        <div className="flex-1 bg-white rounded-[2rem] shadow-xl border border-slate-100 flex flex-col overflow-hidden relative">
-            
-            {/* Table Header (Players) */}
-            <div className="flex border-b border-slate-100 bg-white z-10">
-                <div className="w-24 p-4 shrink-0 flex items-end pb-2 font-bold text-slate-300 text-xs uppercase tracking-widest">
-                    Round
-                </div>
-                <div className="flex-1 flex overflow-x-auto no-scrollbar">
-                    {totals.map((p: any, i: number) => (
-                        <div key={p.id} className="flex-1 min-w-[120px] p-4 text-center border-l border-dashed border-slate-100">
-                            <div className="font-black text-slate-800 text-lg truncate mb-1">{p.name}</div>
-                            <div className={`text-xs font-bold inline-block px-2 py-0.5 rounded-full border ${getRankStyle(p.total)}`}>
-                                {p.total} pts
-                            </div>
-                        </div>
-                    ))}
-                </div>
-                {/* Space for scrollbar offset if needed */}
-                <div className="w-4 shrink-0"></div>
+            <div className="flex items-center gap-3">
+                <Popover>
+                    <PopoverTrigger asChild>
+                        <Button variant="outline" className={cn("w-[200px] justify-start text-left font-normal border-slate-200 h-11 bg-white", !date && "text-muted-foreground")}>
+                            <CalendarIcon className="mr-2 h-4 w-4 text-purple-600" />
+                            {date ? format(date, "PPP") : <span>Pick a date</span>}
+                        </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-auto p-0" align="end">
+                        <Calendar mode="single" selected={date} onSelect={setDate} initialFocus />
+                    </PopoverContent>
+                </Popover>
+                <Button onClick={handleAddPlayer} className="h-11 bg-purple-700 hover:bg-purple-800 text-white px-6 font-semibold shadow-sm">
+                    <UserPlus className="mr-2 h-4 w-4" /> Add Player
+                </Button>
             </div>
+        </div>
+      </div>
 
-            {/* Table Body (Scores) */}
-            <div className="flex-1 overflow-y-auto custom-scrollbar" ref={scrollRef}>
-                {rows.map((rowName: string | number, rIdx: number) => (
-                    <div key={rIdx} className="flex hover:bg-slate-50 transition-colors group">
-                        <div className="w-24 p-4 shrink-0 flex items-center font-bold text-slate-400 text-sm border-b border-slate-50 group-hover:border-slate-100">
-                             {isFixed ? rowName : (rIdx + 1)}
-                        </div>
-                        <div className="flex-1 flex">
-                            {players.map((p: SessionPlayer) => (
-                                <div key={p.id} className="flex-1 min-w-[120px] border-l border-dashed border-slate-100 border-b border-slate-50 relative">
-                                    <input 
-                                        type="number"
-                                        placeholder="-"
-                                        className="w-full h-full text-center bg-transparent font-medium text-lg text-slate-600 focus:text-blue-600 outline-none focus:bg-blue-50/50 transition-all placeholder:text-slate-200"
-                                        defaultValue={getScore(scores, rIdx, p.id)}
-                                        onBlur={(e) => handleScoreChange(rIdx, p.id, e.target.value)}
-                                    />
-                                </div>
-                            ))}
-                        </div>
-                    </div>
+      {/* --- TANSTACK TABLE CARD --- */}
+      <div className="mx-auto max-w-[1400px] bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
+        <Table className="w-full">
+            <TableHeader className="bg-transparent">
+                {table.getHeaderGroups().map(headerGroup => (
+                    <TableRow key={headerGroup.id} className="hover:bg-transparent border-b border-slate-100">
+                        {headerGroup.headers.map(header => (
+                            <TableHead key={header.id} className="h-16 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                                {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
+                            </TableHead>
+                        ))}
+                    </TableRow>
                 ))}
-                
-                {/* Bottom spacer */}
-                <div className="h-20" />
-            </div>
+            </TableHeader>
+            
+            <TableBody>
+                {table.getRowModel().rows.map(row => (
+                    <TableRow key={row.id} className="hover:bg-slate-50 border-b border-slate-100 last:border-0 group">
+                        {row.getVisibleCells().map(cell => (
+                            <TableCell key={cell.id} className="p-3">
+                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                            </TableCell>
+                        ))}
+                    </TableRow>
+                ))}
+            </TableBody>
 
-             {/* Total Footer (Sticky) */}
-             <div className="bg-slate-900 text-white flex shadow-lg mt-auto z-20">
-                <div className="w-24 p-4 flex items-center font-bold text-slate-500 text-xs uppercase">Total</div>
-                <div className="flex-1 flex">
-                    {totals.map((p: any) => (
-                        <div key={p.id} className="flex-1 min-w-[120px] p-4 text-center border-l border-slate-800">
-                            <span className="font-mono text-xl font-bold">{p.total}</span>
-                        </div>
-                    ))}
-                </div>
-             </div>
+            {/* --- FOOTER FOR FORMULAS --- */}
+            <TableFooter className="bg-white border-t border-slate-100">
+                 {table.getFooterGroups().map(footerGroup => (
+                    <TableRow key={footerGroup.id} className="hover:bg-transparent border-none">
+                        {footerGroup.headers.map(header => (
+                            <TableCell key={header.id} className="h-20 align-middle">
+                                {header.isPlaceholder ? null : flexRender(header.column.columnDef.footer, header.getContext())}
+                            </TableCell>
+                        ))}
+                    </TableRow>
+                ))}
+            </TableFooter>
+        </Table>
+
+        {/* Bottom Metadata */}
+        <div className="flex items-center gap-2 p-6 pt-0 text-xs font-bold text-slate-300">
+             <Button variant="outline" size="sm" className="h-8 w-8 p-0 border-slate-200 text-slate-400" onClick={onBack}>
+                <ArrowLeft size={14} />
+             </Button>
+            <span>Total Rounds: {table.getRowModel().rows.length}</span>
         </div>
-
-        {/* RIGHT SIDE: Add Player Button */}
-        <div className="w-20 pt-20 flex flex-col items-center gap-4">
-             <button 
-                onClick={handleAddPlayer}
-                className="w-16 h-16 rounded-full bg-white shadow-lg border-2 border-slate-100 flex flex-col items-center justify-center text-slate-400 hover:text-blue-600 hover:border-blue-200 hover:scale-105 transition-all group"
-                title="Add Player"
-             >
-                <UserPlus size={24} />
-             </button>
-             <span className="text-xs font-bold text-slate-400 w-20 text-center uppercase">Add Player</span>
-        </div>
-
-      </main>
-
-      {/* --- FOOTER: HISTORY --- */}
-      <footer className="px-8 pb-6">
-        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-                <Clock size={14} /> Earlier Games Today
-            </h3>
-            <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar">
-                {history.filter(h => h.id !== sessionId).length === 0 ? (
-                    <div className="text-sm text-slate-400 italic pl-1">No other games played today.</div>
-                ) : (
-                    history.filter(h => h.id !== sessionId).map(h => (
-                        <button 
-                            key={h.id}
-                            // Usually you would navigate here, for now just a visual or callback
-                            className="flex items-center gap-3 px-4 py-3 bg-slate-50 rounded-xl hover:bg-blue-50 hover:ring-2 ring-blue-100 transition-all text-left min-w-[200px]"
-                        >
-                            <div className="w-10 h-10 rounded-lg bg-white shadow-sm flex items-center justify-center text-slate-300">
-                                <Trophy size={18} />
-                            </div>
-                            <div>
-                                <div className="font-bold text-slate-700 text-sm">{h.template_name}</div>
-                                <div className="text-xs text-slate-400">ID: {h.id.slice(0,4)}...</div>
-                            </div>
-                        </button>
-                    ))
-                )}
-            </div>
-        </div>
-      </footer>
-
+      </div>
     </div>
   );
 };

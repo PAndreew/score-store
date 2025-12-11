@@ -3,103 +3,116 @@ import { useLedger } from './hooks/useLedger';
 import { NewGameModal } from './components/NewGameModal';
 import { ActiveSession } from './ActiveSession';
 import { db } from './services/database';
-import { Plus, Trophy, ArrowRight } from 'lucide-react';
+import { Plus } from 'lucide-react';
+import { Button } from './components/ui/button';
+import { Card } from './components/ui/card';
 
 function App() {
   const { isReady, todaySessions, templates, refresh } = useLedger();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
-  // Auto-open last session if available (optional UX choice, kept off for menu)
-  
-  if (!isReady) return <div className="h-screen flex items-center justify-center bg-slate-50 text-slate-400 font-bold animate-pulse">Loading Ledger...</div>;
+  if (!isReady) return <div className="flex h-screen items-center justify-center text-purple-600 font-bold">Loading Ledger...</div>;
 
   if (activeSessionId) {
     return (
         <ActiveSession 
             sessionId={activeSessionId} 
-            history={todaySessions}
             onBack={() => { setActiveSessionId(null); refresh(); }} 
-            onNewGame={() => setIsModalOpen(true)}
         />
     );
   }
 
-  // DASHBOARD VIEW (When no game is active)
   return (
-    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-6">
-       
-       <div className="max-w-4xl w-full grid grid-cols-1 md:grid-cols-3 gap-6">
+    <div className="min-h-screen bg-gray-50/50 p-8 font-sans">
+       <div className="mx-auto max-w-7xl">
             
-            {/* Title Block */}
-            <div className="md:col-span-3 mb-4">
-                <h1 className="text-4xl font-black text-slate-800 mb-2">George's Ledger</h1>
-                <p className="text-slate-500 font-medium">
-                    {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-                </p>
-            </div>
-
-            {/* New Game Card (Hero) */}
-            <button 
-                onClick={() => setIsModalOpen(true)}
-                className="md:col-span-2 bg-slate-900 rounded-[2.5rem] p-10 text-left hover:scale-[1.02] transition-transform shadow-2xl flex flex-col justify-between h-80 relative overflow-hidden group"
-            >
-                <div className="absolute top-0 right-0 w-64 h-64 bg-slate-800 rounded-full -mr-16 -mt-16 opacity-50 transition-all group-hover:scale-110"></div>
-                
-                <div className="relative z-10">
-                    <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mb-6">
-                        <Plus size={32} className="text-slate-900" />
+            {/* Header */}
+            <div className="mb-8 flex items-end justify-between">
+                <div>
+                    <div className="flex gap-4 border-b border-gray-200 pb-1 mb-6">
+                        <span className="border-b-2 border-purple-700 pb-3 text-sm font-semibold text-purple-700">Recent Games</span>
+                        <span className="pb-3 text-sm font-medium text-gray-500 hover:text-gray-700 cursor-pointer">All Time</span>
+                        <span className="pb-3 text-sm font-medium text-gray-500 hover:text-gray-700 cursor-pointer">Templates</span>
                     </div>
-                    <h2 className="text-4xl font-bold text-white mb-2">New Game</h2>
-                    <p className="text-slate-400 text-lg">Start a fresh scoreboard.</p>
+                    <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
                 </div>
-
-                <div className="flex items-center gap-2 text-white font-bold relative z-10">
-                    Select Template <ArrowRight size={20} />
-                </div>
-            </button>
-
-            {/* Recent Games List */}
-            <div className="bg-white rounded-[2.5rem] p-8 shadow-xl flex flex-col h-80">
-                <h3 className="font-bold text-slate-400 uppercase tracking-widest mb-6 text-sm">Today's Games</h3>
-                
-                <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar pr-2">
-                    {todaySessions.length === 0 ? (
-                         <div className="h-full flex flex-col items-center justify-center text-slate-300 text-center">
-                            <Trophy size={48} className="mb-2 opacity-50"/>
-                            <p>No games yet.</p>
-                         </div>
-                    ) : (
-                        todaySessions.map(session => (
-                            <button 
-                                key={session.id} 
-                                onClick={() => setActiveSessionId(session.id)}
-                                className="w-full bg-slate-50 p-4 rounded-2xl hover:bg-blue-50 text-left group transition-colors"
-                            >
-                                <div className="font-bold text-slate-700 group-hover:text-blue-700">{session.template_name}</div>
-                                <div className="text-xs text-slate-400 flex justify-between mt-1">
-                                    <span>{new Date(session.played_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                                    <span className="group-hover:translate-x-1 transition-transform">→</span>
-                                </div>
-                            </button>
-                        ))
-                    )}
-                </div>
+                <Button 
+                    onClick={() => setIsModalOpen(true)}
+                    className="h-12 rounded-lg bg-purple-700 px-6 font-semibold text-white shadow-lg hover:bg-purple-800"
+                >
+                    <Plus className="mr-2 h-5 w-5" /> New Game
+                </Button>
             </div>
 
+            {/* Content Table Style Card */}
+            <Card className="overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm">
+                <div className="grid grid-cols-12 border-b border-gray-100 bg-gray-50/50 py-4 px-6 text-xs font-semibold uppercase tracking-wider text-gray-500">
+                    <div className="col-span-4">Game Template</div>
+                    <div className="col-span-3">Played At</div>
+                    <div className="col-span-3">Status</div>
+                    <div className="col-span-2 text-right">Action</div>
+                </div>
+
+                {todaySessions.length === 0 ? (
+                    <div className="py-12 text-center text-gray-400">
+                        No games played today. Start a new one!
+                    </div>
+                ) : (
+                    <div className="divide-y divide-gray-100">
+                        {todaySessions.map(session => (
+                            <div key={session.id} className="grid grid-cols-12 items-center py-4 px-6 hover:bg-gray-50 transition-colors">
+                                <div className="col-span-4 flex items-center gap-3">
+                                    <div className="h-10 w-10 rounded-full bg-purple-100 flex items-center justify-center text-purple-700 font-bold">
+                                        {session.template_name.substring(0,1)}
+                                    </div>
+                                    <span className="font-semibold text-gray-900">{session.template_name}</span>
+                                </div>
+                                <div className="col-span-3 text-sm text-gray-500">
+                                    {new Date(session.played_at).toLocaleDateString()}
+                                </div>
+                                <div className="col-span-3">
+                                    <span className="inline-flex items-center rounded-full bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">
+                                        In Progress
+                                    </span>
+                                </div>
+                                <div className="col-span-2 text-right">
+                                    <Button 
+                                        variant="ghost" 
+                                        size="sm"
+                                        onClick={() => setActiveSessionId(session.id)}
+                                        className="text-purple-600 hover:text-purple-700 hover:bg-purple-50"
+                                    >
+                                        Open Board
+                                    </Button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </Card>
+
+            {/* Pagination / Footer Simulator */}
+            <div className="mt-6 flex items-center justify-between text-sm text-gray-500">
+                <p>Total Table Show: {todaySessions.length}</p>
+                <div className="flex gap-2">
+                    <Button variant="outline" size="sm" className="h-8 w-8 p-0" disabled>&lt;</Button>
+                    <Button variant="default" size="sm" className="h-8 w-8 bg-purple-700 p-0 hover:bg-purple-800">1</Button>
+                    <Button variant="outline" size="sm" className="h-8 w-8 p-0">&gt;</Button>
+                </div>
+            </div>
        </div>
 
-      {isModalOpen && (
-        <NewGameModal 
-            templates={templates} 
-            onClose={() => setIsModalOpen(false)}
-            onStart={(templateId: string, players: string[]) => {
-                const id = db.createSession(templateId, players);
-                setIsModalOpen(false);
-                setActiveSessionId(id);
-            }}
-        />
-      )}
+      <NewGameModal 
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        templates={templates}
+        onStart={(templateId, players) => {
+            const id = db.createSession(templateId, players);
+            setIsModalOpen(false);
+            setActiveSessionId(id);
+        }}
+      />
     </div>
   );
 }
